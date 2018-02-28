@@ -19,10 +19,13 @@
 #include <time.h>
 
 #define BILLION 1000000000L
+#define SHMKEY_sim_s 0420423
+#define SHMKEY_sim_ns 0420145
+#define BUFF_SZ sizeof (int)
 
 //function prototype declarations
+void clearShm();
 static void helpmessage();
-static void clearshm();
 static int setperiodic(double);
 static int setinterrupt();
 static void interrupt(int signo, siginfo_t *info, void *context);
@@ -31,6 +34,7 @@ static void siginthandler(int sig_num);
 pid_t childpids[25];
 int maxSlaves = 5; //number of slave processes, default 5
 static FILE *log; //master log file pointer
+int shmid_sim_s, shmid_sim_ns; //shared memory ID holders for sim clock
 
 /*
  * 
@@ -42,11 +46,11 @@ int main(int argc, char** argv) {
     int sh_status; //status holder for wait
     extern char *optarg; //getopt arguments
     int option; //getopt int
-    double runtime = 20; //time before master terminates, default 20
+    double runtime = 20.0; //time before master terminates, default 20
     char logfilename[50]; //string for name of log file
     char str_proclimit[10]; //string arg for exec-ing slaves
     char str_slavenum[10]; //string arg for exec-ing slaves
-    pid_t childpid, sh_wpid;
+    pid_t childpid, sh_wpid; //pid holders
     
      //getopt loop to parse command line options
     while ((option = getopt(argc, argv, "hs:t:l:")) != -1) {
@@ -58,6 +62,10 @@ int main(int argc, char** argv) {
             case 's':
                 sflag = 1;
                 maxSlaves = atoi(optarg);
+                if ( (maxSlaves < 1) || (maxSlaves > 18) ) {
+                    printf("Master: Error: -s range is 1 to 18.\n");
+                    exit(0);
+                }
                 break;
             case 'l':
                 lflag = 1;
@@ -65,10 +73,9 @@ int main(int argc, char** argv) {
                 break;
             case 't':
                 tflag = 1;
-                runtime = (double)atoi(optarg);
+                runtime = atoi(optarg);
                 break;
             default:
-                
                 break;
         }
     }
@@ -88,9 +95,9 @@ int main(int argc, char** argv) {
     }
     
     if (tflag)
-        printf("Master: Runtime limit set to %d seconds.\n", runtime);
+        printf("Master: Runtime limit set to %2.1f seconds.\n", runtime);
     else
-        printf("Master: Using default runtime limit of %d seconds.\n", runtime);
+        printf("Master: Using default runtime limit of %2.1f seconds.\n", runtime);
     
     // Set up interrupt handler
     signal (SIGINT, siginthandler);
@@ -104,55 +111,80 @@ int main(int argc, char** argv) {
         return 1;
     }
     
+    // Set up shared memory
+    shmid_sim_s = shmget(SHMKEY_sim_s, BUFF_SZ, 0777 | IPC_CREAT);
+        if (shmid_sim_s == -1) { //terminate if shmget failed
+            perror("Master: error in shmget shmid_sim_s");
+            return 1;
+        }
+    int *sim_s = (int*) shmat(shmid_sim_s, 0, 0);
+    
+    shmid_sim_ns = shmget(SHMKEY_sim_ns, BUFF_SZ, 0777 | IPC_CREAT);
+        if (shmid_sim_ns == -1) { //terminate if shmget failed
+            perror("Master: error in shmget shmid_sim_ns");
+            return 1;
+        }
+    int *sim_ns = (int*) shmat(shmid_sim_ns, 0, 0);
+    
+    //testing shm
+    *sim_s = 2;
+    printf("Master: sim_s = %d\n", *sim_s);
+    
+    *sim_ns = 1000000;
+    printf("Master: sim_ns = %d\n", *sim_ns);
+    
+    
+    
     //BEGIN MEAT OF PROGRAM*****************************************************
     
+    //while (sim_clock_s < 2)
     for (i=0; i<maxSlaves; i++) {
         if ( (childpid = fork()) < 0 ){ //terminate code
                 perror("Error forking consumer");
                 return 1;
             }
         if (childpid == 0) { //child code
-            sprintf(str_proclimit, "%d", maxSlaves); //build arg1 string
             sprintf(str_slavenum, "%d", i); //build arg2 string
+            sprintf(str_proclimit, "%d", maxSlaves); //build arg1 string
             execlp("./user", "./user", str_slavenum, str_proclimit, (char *)NULL);
             perror("execl() failure"); //report & exit if exec fails
-            return 1;
+            return 0;
         }
         printf("Master: Slave forked.\n");
+        //wait for message from terminating child (includes logical slave#?)
+        //critical section: increment simulaton clock, write to log, 
     }
     
     
     //END MEAT OF PROGRAM*******************************************************
     
     //wait for children to finish
-    
     printf("Master: Waiting for children to finish...\n");
     while ( (sh_wpid = wait(&sh_status)) > 0);
+
+    //clear shared memory and exit
+    clearShm();
     printf("Master: Normal exit.\n");
     return 1;
 }
 
 //print usage message and exit
 static void helpmessage() {
-    printf("Usage: ./oss [ -s <number> ] [ -l <filename> ] [ -t <number> ] [ -h ]\n");
-    printf("s: number of slave processes to run. l: logfile name (.log extension added automatically).\n");
+    printf("Usage: ./oss [ -s <number 1-18> ] [ -l <filename> ] [ -t <number> ] [ -h ]\n");
+    printf("s: number of slave processes to run (max 18). l: logfile name (.log extension added automatically).\n");
     printf("t: time limit in seconds before master terminates. h: help\n");
     exit(0);
 }
 
-static void clearShm() {
-    //remove shared memory for turn variable or report via perror and exit
-    printf("master: Clearing shared memory...\n");
-    /*
-    if ( shmctl(shmid_turn, IPC_RMID, NULL) == -1) {
+//function to clear shared memory
+void clearShm() {
+    printf("Master: Clearing shared memory...\n");
+    if ( shmctl(shmid_sim_s, IPC_RMID, NULL) == -1) {
         perror("error removing shared memory");
     }
-    //remove shared memory for flag array or report perror and exit
-    if ( shmctl(shmid_flagarr, IPC_RMID, NULL) == -1) {
+    if ( shmctl(shmid_sim_ns, IPC_RMID, NULL) == -1) {
         perror("error removing shared memory");
     }
-    */
-    exit(0);
 }
 
 //this function taken from UNIX text
@@ -202,10 +234,11 @@ static void interrupt(int signo, siginfo_t *info, void *context) {
     printf("master: All children terminated\n");
     clearShm();
     
-    if (fclose(log) != 0);
-        perror("Master: Error closing log file");
+    //close log file
+    //if (fclose(log) != 0);
+    //    perror("Master: Error closing log file");
         
-    printf("master: Terminated: Timed Out\n");
+    printf("Master: Terminated: Timed Out\n");
     exit(0);
 }
 
