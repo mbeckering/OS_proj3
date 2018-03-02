@@ -1,1 +1,7 @@
+.log extention auto-added to logfile name
 
+For usage:
+./oss -h
+
+I use two message queues: One for mutex protection of the sim clock, and one
+for the slaves to notify the parent when they terminate.
