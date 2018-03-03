@@ -19,12 +19,12 @@
 #include <time.h>
 #include <sys/msg.h>
 
-#define BILLION 1000000000L
 #define SHMKEY_sim_s 0420423
 #define SHMKEY_sim_ns 0420145
 #define BUFF_SZ sizeof (int)
 #define mutexkey 0420323
 #define commskey 0420541
+#define BILLION 1000000000 //dont want to type the wrong # of zeroes
 
 // Function prototype declarations
 void killchildren();
@@ -36,7 +36,7 @@ static void interrupt(int signo, siginfo_t *info, void *context);
 static void siginthandler(int sig_num);
 
 // GLOBALS
-pid_t childpids[25];
+pid_t childpids[25]; //pid array for child processes so we can kill them later
 int maxSlaves = 5; //number of slave processes, default 5
 static FILE *log; //master log file pointer
 int shmid_sim_s, shmid_sim_ns; //shared memory ID holders for sim clock
@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
     struct commsbuf {
         long mtype;
         pid_t childpid;
-        int s, ns;
+        int s, ns, logicnum;
     };
     struct commsbuf childinfo;
     
@@ -107,6 +107,7 @@ int main(int argc, char** argv) {
         }
     }
     
+    //output based on options and args
     if (sflag)
         printf("Master: Slave process limit set to %d.\n", maxSlaves);
     else
@@ -194,13 +195,13 @@ int main(int argc, char** argv) {
     }
     
     while (1) {
-        //wait for message from terminating child (includes logical slave)
+        //wait for message from terminating child (includes logical slave#)
         if ( msgrcv(comms_qid, &childinfo, sizeof(childinfo), 1, 0) == -1 ) {
             perror("Slave: error in msgrcv");
             exit(0);
         }
         //write child termination to log
-        printf("Master: Rcvd child termination pid:%ld, n:%d, ns:%d\n",
+        printf("Master: Rcvd child termination pid:%ld, %d:%d\n",
             childinfo.childpid, childinfo.s, childinfo.ns);
         
         //critical section 
@@ -214,31 +215,52 @@ int main(int argc, char** argv) {
         localsec = *sim_s;
         localns = *sim_ns;
         localns = localns + 100; //increment 100ns for master operation
-        if (localns >= 1000000) { //roll back ns if exceeding 1million
+        if (localns >= BILLION) { //roll ns to s if exceeding 1billion
             localsec++;
-            temp = 1000000 - localns;
+            temp = BILLION - localns;
             localns = 100 - temp;
         }
-        printf("Master: Clock+100=: %d : %d\n", localsec, localns);
+        
+        //break and terminate if we've reached 2 total seconds
         if (localsec >= 2) {
-            printf("Master: Sim clock limit reached, breaking...\n");
+            printf("Master: Sim clock limit reached after %d forks: %d:%d\n", 
+                    totalforks, localsec, localns);
             break;
         }
-        //else increment clock by 100ns
+        
+        //update sim clock in shared memory
+        *sim_s = localsec;
+        *sim_ns = localns;
         
         //cede clock access
         if ( msgsnd(mutex_qid, &mutexmsg, sizeof(mutexmsg), 0) == -1 ) {
             perror("Master: error sending init msg");
             exit(0);
         }
-        sleep(1);
         //fork new child and STORE CHILDPID in logical slave# array position
+        if ( (childpid = fork()) < 0 ){ //terminate code
+                perror("Error forking consumer");
+                return 1;
+            }
+        if (childpid == 0) { //child code
+            sprintf(str_slavenum, "%d", childinfo.logicnum); //build arg2 string
+            sprintf(str_proclimit, "%d", maxSlaves); //build arg1 string
+            execlp("./user", "./user", str_slavenum, str_proclimit, (char *)NULL);
+            perror("execl() failure"); //report & exit if exec fails
+            return 0;
+        }
+        childpids[childinfo.logicnum] = childpid; //store child pid to array
+        totalforks++;
+        //break if fork limit is reached
+        if ( totalforks >= 600) {
+            printf("Master: 600 forks reached, breaking.\n");
+            break;
+        }
     }
     
     //END MEAT OF PROGRAM*******************************************************
     
     //If this point is reached, total runtime has been met
-    //close up shop
     //clear shared memory and message queues and exit
     killchildren();
     clearIPC();
@@ -248,8 +270,10 @@ int main(int argc, char** argv) {
 
 //print usage message and exit
 static void helpmessage() {
-    printf("Usage: ./oss [ -s <number 1-18> ] [ -l <filename> ] [ -t <number> ] [ -h ]\n");
-    printf("s: number of slave processes to run (max 18). l: logfile name (.log extension added automatically).\n");
+    printf("Usage: ./oss [ -s <number 1-18> ] [ -l <filename> ] "
+            "[ -t <number> ] [ -h ]\n");
+    printf("s: number of slave processes to run (max 18). l: logfile name "
+            "(.log extension added automatically).\n");
     printf("t: time limit in seconds before master terminates. h: help\n");
     exit(0);
 }
@@ -318,7 +342,7 @@ static int setinterrupt() {
 
 static void interrupt(int signo, siginfo_t *info, void *context) {
     printf("Master: Timer Interrupt Detected! signo = %d\n", signo);
-    printf("Master: Clearing IPC resources...\n");
+    killchildren();
     clearIPC();
     //close log file
     //if (fclose(log) != 0);

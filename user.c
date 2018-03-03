@@ -1,13 +1,8 @@
-/*
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
-
 /* 
  * File:   user.c
  * Author: Jodicus
- *
+ * Project 3
+ * Spring 2018 CS-4760-E01
  * Created on February 28, 2018, 10:08 AM
  */
 
@@ -26,10 +21,12 @@
 #define BUFF_SZ sizeof (int)
 #define mutexkey 0420323
 #define commskey 0420541
+#define BILLION 1000000000 //dont want to type the wrong # of zeroes
 
+//prototype function declarations
 static void siginthandler(int);
 
-static FILE *log; //master log file pointer
+// GLOBALS
 int shmid_sim_s, shmid_sim_ns; //shared memory ID holders for sim clock
 
 /*
@@ -45,15 +42,14 @@ int main(int argc, char** argv) {
     int temp; //variable swapper
     int ag_runtime; //aggregate runtime for this slave
     
-    //select random runtime_limit 1 - 1,000,000
+    //select random runtime_limit
     unsigned long seed = 3*(int)getpid() + 3*slavenum;
     srand(seed);
     unsigned long runtime_limit = rand();
-    runtime_limit <<= 15; //next 4 lines taken from stackoverflow
+    runtime_limit <<= 15; //next 4 lines taken from stackoverflow for big rands
     runtime_limit ^= rand();
-    runtime_limit %= 1000000;
+    runtime_limit %= 10000000;
     runtime_limit++;
-    printf("Slave %d: random runtime_limit = %ld\n", slavenum, runtime_limit);
     
     //struct for mutex enforcement message queue
     struct mutexbuf {
@@ -68,15 +64,13 @@ int main(int argc, char** argv) {
     struct commsbuf {
         long mtype;
         pid_t pid;
-        int s, ns;
+        int s, ns, logicnum;
     };
     struct commsbuf myinfo;
     myinfo.mtype = 1;
     myinfo.pid = getpid();
     
-    printf("Slave %d: Launched.\n", slavenum+1, slavelimit);
-    
-    //interrupt handler
+    // Set up interrupt handler
     signal (SIGINT, siginthandler);
     
     // Set up shared memory
@@ -94,10 +88,6 @@ int main(int argc, char** argv) {
         }
     int *sim_ns = (int*) shmat(shmid_sim_ns, 0, 0);
     
-    //testing shm
-    //printf("Slave %d: sim_s = %d\n", slavenum, *sim_s);
-    //printf("Slave %d: sim_ns = %d\n", slavenum, *sim_ns);
-    
     // Set up message queues
     int mutexq_id;
     if ( (mutexq_id = msgget(mutexkey, 0777)) == -1 ) {
@@ -111,7 +101,6 @@ int main(int argc, char** argv) {
     }
     
     // The Business Loop********************************************************
-    // (change to while counter < runtim)
     while (1) {
         //barrier to enter critical section
         if ( msgrcv(mutexq_id, &mutexmsg, sizeof(mutexmsg), 1, 0) == -1 ) {
@@ -123,61 +112,72 @@ int main(int argc, char** argv) {
         local_ns = *sim_ns;
         //cede and break if total master runtime_limit has been reached
         if (local_s >= 2) {
-            printf("Slave %d: total master runtime limit reached, ceding...\n", slavenum);
+            printf("Slave %d: total master runtime limit reached. "
+                    "Ceding and terminating.\n", slavenum);
             if ( msgsnd(mutexq_id, &mutexmsg, sizeof(mutexmsg), 0) == -1 ) {
                 perror("Slave: error exiting crit section");
-            exit(0);
+                exit(0);
+            }
+            //pack information into message queue struct
+            myinfo.s = local_s;
+            myinfo.ns = local_ns;
+            myinfo.logicnum = slavenum;
+            //send message to master that I'm terminating
+            if ( msgsnd(commsqid, &myinfo, sizeof(myinfo), 0) == -1 ) {
+                perror("Slave: Error sending termination message");
+                exit(0);
             }
             break;
         }
+        
         //generate random work time
+        seed = seed*( (slavenum + 1) *3);
         srand(seed);
-        worktime = rand() %20000 + 1;
-        printf("Slave %d: Tryna work %d ns.\n", slavenum, worktime);
+        worktime = rand() %200000 + 1;
+
         //if this worktime will exceed my slave runtime limit
         if (ag_runtime + worktime >= runtime_limit) {
             temp = runtime_limit - ag_runtime; //remainder of time before my limit
             ag_runtime = ag_runtime + temp; //total time i worked
-            local_ns = local_ns + temp; //increment ns by the time I was allowed to work before cutoff
-            //send message to master that I've finished
+            local_ns = local_ns + temp; //increment ns by the time until cutoff
+            //pack info and send message to master that I'm terminating
             myinfo.s = local_s;
             myinfo.ns = local_ns;
+            myinfo.logicnum = slavenum;
             if ( msgsnd(commsqid, &myinfo, sizeof(myinfo), 0) == -1 ) {
                 perror("Slave: Error sending termination message");
                 exit(0);
             }
             //cede the crit section before exiting
             if ( msgsnd(mutexq_id, &mutexmsg, sizeof(mutexmsg), 0) == -1 ) {
-                printf("Slave %d:", slavenum);
-                perror("error exiting crit section");
+                perror("Slave: error exiting crit section");
             exit(0);
-        }
+            }
             break;//break out and terminate this process
         }
-        
+
         local_ns = local_ns + worktime; //increment local clock variable
-        if (local_ns >= 1000000) { //roll back ns if exceeding 1million
+        ag_runtime = ag_runtime + worktime; //increment my aggregate work time
+        
+        if (local_ns >= BILLION) { //roll back ns if exceeding 1million
             local_s++;
-            temp = 1000000 - local_ns;
+            temp = BILLION - local_ns;
             local_ns = worktime - temp;
         }
-        printf("Slave %d: clock now at %d : %d\n", slavenum, local_s, local_ns);
+
         //update sim clock in chared memory
         *sim_s = local_s;
         *sim_ns = local_ns;
         
         //end critical section and cede clock access
         if ( msgsnd(mutexq_id, &mutexmsg, sizeof(mutexmsg), 0) == -1 ) {
-            printf("Slave %d:", slavenum);
             perror("error exiting crit section");
             exit(0);
         }
-        sleep(1);
     }
     
     // End Business Loop********************************************************
     
-    printf("Slave: %d of %d normal exit.\n", slavenum+1, slavelimit);
     return 1;
 }
 
