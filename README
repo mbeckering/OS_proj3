@@ -5,5 +5,8 @@ Version control: https://github.com/mbeckering/OS_proj3
 For usage:
 ./oss -h
 
+I tuned the work time number generator up to 1-100,000,000 in order to decrease
+my number of forks to a reasonable value.
+
 I use two message queues: One for mutex protection of the sim clock, and one
 for the slaves to notify the parent when they terminate.

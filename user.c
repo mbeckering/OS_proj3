@@ -38,9 +38,12 @@ int main(int argc, char** argv) {
     slavelimit = atoi(argv[2]); //max number of concurrent slaves
     int mutexmsgid, commsqid; //message id for the mutex enforcement queue
     int local_s, local_ns; //local variables for clock values
+    int starttime; //time on sim clock at first clock read
     int worktime; //amount of work done each cycle (randomized in critical section)
+    int lifetime; //time on sim clock from first read to termination
     int temp; //variable swapper
     int ag_runtime; //aggregate runtime for this slave
+    int i = 0; //iterator
     
     //select random runtime_limit
     unsigned long seed = 3*(int)getpid() + 3*slavenum;
@@ -48,7 +51,7 @@ int main(int argc, char** argv) {
     unsigned long runtime_limit = rand();
     runtime_limit <<= 15; //next 4 lines taken from stackoverflow for big rands
     runtime_limit ^= rand();
-    runtime_limit %= 10000000;
+    runtime_limit %= 100000000;
     runtime_limit++;
     
     //struct for mutex enforcement message queue
@@ -64,7 +67,7 @@ int main(int argc, char** argv) {
     struct commsbuf {
         long mtype;
         pid_t pid;
-        int s, ns, logicnum;
+        int s, ns, logicnum, lifetime, runtime;
     };
     struct commsbuf myinfo;
     myinfo.mtype = 1;
@@ -112,7 +115,7 @@ int main(int argc, char** argv) {
         local_ns = *sim_ns;
         //cede and break if total master runtime_limit has been reached
         if (local_s >= 2) {
-            printf("Slave %d: total master runtime limit reached. "
+            printf("Slave %02d: Total master runtime limit reached. "
                     "Ceding and terminating.\n", slavenum);
             if ( msgsnd(mutexq_id, &mutexmsg, sizeof(mutexmsg), 0) == -1 ) {
                 perror("Slave: error exiting crit section");
@@ -122,6 +125,7 @@ int main(int argc, char** argv) {
             myinfo.s = local_s;
             myinfo.ns = local_ns;
             myinfo.logicnum = slavenum;
+            myinfo.runtime = ag_runtime;
             //send message to master that I'm terminating
             if ( msgsnd(commsqid, &myinfo, sizeof(myinfo), 0) == -1 ) {
                 perror("Slave: Error sending termination message");
@@ -140,10 +144,20 @@ int main(int argc, char** argv) {
             temp = runtime_limit - ag_runtime; //remainder of time before my limit
             ag_runtime = ag_runtime + temp; //total time i worked
             local_ns = local_ns + temp; //increment ns by the time until cutoff
+            
+            if (local_ns >= BILLION) { //roll back ns if exceeding 1billion
+                local_s++;
+                *sim_s = local_s; //increment seconds on shared sim clock
+                temp = BILLION - local_ns;
+                local_ns = worktime - temp;
+            }
+            *sim_ns = local_ns; //increment shared sim clock
             //pack info and send message to master that I'm terminating
             myinfo.s = local_s;
             myinfo.ns = local_ns;
             myinfo.logicnum = slavenum;
+            myinfo.runtime = ag_runtime;
+            printf("Slave %d: ag_runtime=%d, runtime_limit=%d\n", slavenum, ag_runtime, runtime_limit);
             if ( msgsnd(commsqid, &myinfo, sizeof(myinfo), 0) == -1 ) {
                 perror("Slave: Error sending termination message");
                 exit(0);
@@ -153,13 +167,13 @@ int main(int argc, char** argv) {
                 perror("Slave: error exiting crit section");
             exit(0);
             }
-            break;//break out and terminate this process
+            exit(1);
         }
 
         local_ns = local_ns + worktime; //increment local clock variable
         ag_runtime = ag_runtime + worktime; //increment my aggregate work time
         
-        if (local_ns >= BILLION) { //roll back ns if exceeding 1million
+        if (local_ns >= BILLION) { //roll back ns if exceeding 1billion
             local_s++;
             temp = BILLION - local_ns;
             local_ns = worktime - temp;

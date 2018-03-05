@@ -38,7 +38,7 @@ static void siginthandler(int sig_num);
 // GLOBALS
 pid_t childpids[25]; //pid array for child processes so we can kill them later
 int maxSlaves = 5; //number of slave processes, default 5
-static FILE *log; //master log file pointer
+static FILE *mlog; //master log file pointer
 int shmid_sim_s, shmid_sim_ns; //shared memory ID holders for sim clock
 int mutex_qid, comms_qid; //message queue id's
 
@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
     struct commsbuf {
         long mtype;
         pid_t childpid;
-        int s, ns, logicnum;
+        int s, ns, logicnum, lifetime, runtime;
     };
     struct commsbuf childinfo;
     
@@ -90,7 +90,8 @@ int main(int argc, char** argv) {
                 sflag = 1;
                 maxSlaves = atoi(optarg);
                 if ( (maxSlaves < 1) || (maxSlaves > 18) ) {
-                    printf("Master: Error: -s range is 1 to 18. ./oss -h for help.\n");
+                    printf("Master: Error: -s range is 1 to 18. "
+                            "./oss -h for help.\n");
                     exit(0);
                 }
                 break;
@@ -101,6 +102,11 @@ int main(int argc, char** argv) {
             case 't':
                 tflag = 1;
                 runtime = atoi(optarg);
+                if (runtime < 1) {
+                    printf("Master: Input error: -t must be a positive integer."
+                            " ./oss -h for help.\n");
+                    exit(0);
+                }
                 break;
             default:
                 break;
@@ -168,6 +174,16 @@ int main(int argc, char** argv) {
     *sim_s = 0;
     *sim_ns = 0;
     
+    //open file stream for logging
+    
+    mlog = fopen(logfilename, "w");
+    if (mlog == NULL) {
+        perror("producer: error opening log file");
+        return -1;
+    }
+    
+    fprintf(mlog, "Master: Launched.\n");
+    
     //BEGIN MEAT OF PROGRAM*****************************************************
     
     // Push first message into queue to get slaves started
@@ -175,7 +191,7 @@ int main(int argc, char** argv) {
         perror("Master: error sending init msg");
         exit(0);
     }
-    printf("Master: Initialization message pushed to mutex queue\n");
+    printf("Master: Initiating OS simulation...\n");
     
     //this for loop execs the first set of children
     for (i=0; i<maxSlaves; i++) {
@@ -190,6 +206,7 @@ int main(int argc, char** argv) {
             perror("execl() failure"); //report & exit if exec fails
             return 0;
         }
+        fprintf(mlog, "Master: Creating initial child pid %ld\n", childpid);
         childpids[i] = childpid; //store child pid to array
         totalforks++;
     }
@@ -201,8 +218,10 @@ int main(int argc, char** argv) {
             exit(0);
         }
         //write child termination to log
-        printf("Master: Rcvd child termination pid:%ld, %d:%d\n",
-            childinfo.childpid, childinfo.s, childinfo.ns);
+        fprintf(mlog,"Master: Child pid %ld is terminating at time %02d:%09d "
+                "because it reached 00:%09d and lived for time xx.xx.\n",
+            childinfo.childpid, childinfo.s, childinfo.ns, childinfo.runtime);
+        //fflush(mlog);
         
         //critical section 
         //wait for clock access
@@ -223,8 +242,8 @@ int main(int argc, char** argv) {
         
         //break and terminate if we've reached 2 total seconds
         if (localsec >= 2) {
-            printf("Master: Sim clock limit reached after %d forks: %d:%d\n", 
-                    totalforks, localsec, localns);
+            printf("Master: Simulated runtime has reached %02d:%09d after %d forks.\n", 
+                    localsec, localns, totalforks);
             break;
         }
         
@@ -232,11 +251,6 @@ int main(int argc, char** argv) {
         *sim_s = localsec;
         *sim_ns = localns;
         
-        //cede clock access
-        if ( msgsnd(mutex_qid, &mutexmsg, sizeof(mutexmsg), 0) == -1 ) {
-            perror("Master: error sending init msg");
-            exit(0);
-        }
         //fork new child and STORE CHILDPID in logical slave# array position
         if ( (childpid = fork()) < 0 ){ //terminate code
                 perror("Error forking consumer");
@@ -249,7 +263,14 @@ int main(int argc, char** argv) {
             perror("execl() failure"); //report & exit if exec fails
             return 0;
         }
+        fprintf(mlog, "Master: Creating new child pid %ld at my time %02d:%09d\n",
+            childpid, localsec, localns);
         childpids[childinfo.logicnum] = childpid; //store child pid to array
+        //cede clock access
+        if ( msgsnd(mutex_qid, &mutexmsg, sizeof(mutexmsg), 0) == -1 ) {
+            perror("Master: error sending init msg");
+            exit(0);
+        }
         totalforks++;
         //break if fork limit is reached
         if ( totalforks >= 600) {
@@ -259,11 +280,12 @@ int main(int argc, char** argv) {
     }
     
     //END MEAT OF PROGRAM*******************************************************
-    
     //If this point is reached, total runtime has been met
-    //clear shared memory and message queues and exit
+    //kill children, clear shared memory and message queues, and exit
     killchildren();
     clearIPC();
+    fprintf(mlog, "Master: Normal exit.\n");
+    fclose(mlog);
     printf("Master: Normal exit.\n");
     return 1;
 }
@@ -271,7 +293,7 @@ int main(int argc, char** argv) {
 //print usage message and exit
 static void helpmessage() {
     printf("Usage: ./oss [ -s <number 1-18> ] [ -l <filename> ] "
-            "[ -t <number> ] [ -h ]\n");
+            "[ -t <positive number> ] [ -h ]\n");
     printf("s: number of slave processes to run (max 18). l: logfile name "
             "(.log extension added automatically).\n");
     printf("t: time limit in seconds before master terminates. h: help\n");
@@ -282,7 +304,7 @@ static void helpmessage() {
 void killchildren() {
     int sh_status, i;
     pid_t sh_wpid;
-    printf("Master: Killing children..\n");
+    printf("Master: Killing children...\n");
     for (i=0; i < maxSlaves ; i++) {
         kill(childpids[i], SIGINT);
     }
@@ -345,9 +367,8 @@ static void interrupt(int signo, siginfo_t *info, void *context) {
     killchildren();
     clearIPC();
     //close log file
-    //if (fclose(log) != 0);
-    //    perror("Master: Error closing log file");
-        
+    fprintf(mlog, "Master: Terminated: Timed Out\n");
+    fclose(mlog);
     printf("Master: Terminated: Timed Out\n");
     exit(0);
 }
@@ -360,9 +381,9 @@ static void siginthandler(int sig_num) {
     killchildren();
     clearIPC();
     
-    //if (fclose(log) != 0) ;
-    //perror("Master: Error closing log file");
-
+    fprintf(mlog, "Master: Terminated: Interrupted\n");
+    fclose(mlog);
+    
     printf("Master: Terminated: Interrupted\n");
     exit(0);
 }
