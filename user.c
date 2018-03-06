@@ -25,6 +25,7 @@
 
 //prototype function declarations
 static void siginthandler(int);
+int getLifespan(int, int, int, int);
 
 // GLOBALS
 int shmid_sim_s, shmid_sim_ns; //shared memory ID holders for sim clock
@@ -38,15 +39,14 @@ int main(int argc, char** argv) {
     slavelimit = atoi(argv[2]); //max number of concurrent slaves
     int mutexmsgid, commsqid; //message id for the mutex enforcement queue
     int local_s, local_ns; //local variables for clock values
-    int starttime; //time on sim clock at first clock read
+    int starttime_s, starttime_ns; //time on sim clock at first clock read
     int worktime; //amount of work done each cycle (randomized in critical section)
-    int lifetime; //time on sim clock from first read to termination
     int temp; //variable swapper
     int ag_runtime; //aggregate runtime for this slave
     int i = 0; //iterator
     
     //select random runtime_limit
-    unsigned long seed = 3*(int)getpid() + 3*slavenum;
+    unsigned long seed = 3*(int)getpid() - 4*slavenum;
     srand(seed);
     unsigned long runtime_limit = rand();
     runtime_limit <<= 15; //next 4 lines taken from stackoverflow for big rands
@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
     struct commsbuf {
         long mtype;
         pid_t pid;
-        int s, ns, logicnum, lifetime, runtime;
+        int s, ns, logicnum, lifespan, runtime;
     };
     struct commsbuf myinfo;
     myinfo.mtype = 1;
@@ -105,6 +105,7 @@ int main(int argc, char** argv) {
     
     // The Business Loop********************************************************
     while (1) {
+        i++; //iterator
         //barrier to enter critical section
         if ( msgrcv(mutexq_id, &mutexmsg, sizeof(mutexmsg), 1, 0) == -1 ) {
             perror("Slave: error in msgrcv");
@@ -113,6 +114,11 @@ int main(int argc, char** argv) {
         //critical section: pull clock values first
         local_s = *sim_s;
         local_ns = *sim_ns;
+        //on first iteration, store this slave's start time from the sim clock
+        if (i == 1) {
+            starttime_s = local_s;
+            starttime_ns = local_ns;
+        }
         //cede and break if total master runtime_limit has been reached
         if (local_s >= 2) {
             printf("Slave %02d: Total master runtime limit reached. "
@@ -126,6 +132,8 @@ int main(int argc, char** argv) {
             myinfo.ns = local_ns;
             myinfo.logicnum = slavenum;
             myinfo.runtime = ag_runtime;
+            myinfo.lifespan = getLifespan(starttime_s, starttime_ns, local_s,
+                    local_ns);
             //send message to master that I'm terminating
             if ( msgsnd(commsqid, &myinfo, sizeof(myinfo), 0) == -1 ) {
                 perror("Slave: Error sending termination message");
@@ -138,8 +146,38 @@ int main(int argc, char** argv) {
         seed = seed*( (slavenum + 1) *3);
         srand(seed);
         worktime = rand() %200000 + 1;
-
-        //if this worktime will exceed my slave runtime limit
+        
+        //if this worktime will exceed the maximum MASTER runtime of 2 seconds
+        //then only increment enough to reach 2 seconds, then report and quit
+        if ((local_s == 1) && ( (worktime + local_ns) >= BILLION) ) {
+            printf("Slave %d bout to work over 2 sec\n", slavenum);
+            worktime = (BILLION - local_ns);
+            ag_runtime = ag_runtime + worktime;
+            local_s++;
+            local_ns = 0;
+            *sim_s = local_s;
+            *sim_ns = local_ns;
+            //pack info
+            myinfo.s = local_s;
+            myinfo.ns = local_ns;
+            myinfo.logicnum = slavenum;
+            myinfo.runtime = ag_runtime;
+            myinfo.lifespan = getLifespan(starttime_s, starttime_ns, local_s,
+                    local_ns);
+            //send info & message to master that I'm terminating
+            if ( msgsnd(commsqid, &myinfo, sizeof(myinfo), 0) == -1 ) {
+                perror("Slave: Error sending termination message");
+                exit(0);
+            }
+            //cede the critical section before exiting
+            if ( msgsnd(mutexq_id, &mutexmsg, sizeof(mutexmsg), 0) == -1 ) {
+                perror("Slave: error exiting crit section");
+                exit(0);
+            }
+            break;
+        }
+        //if this worktime will exceed my slave runtime limit then only 
+        //increment sim clock by the difference, then report and quit
         if (ag_runtime + worktime >= runtime_limit) {
             temp = runtime_limit - ag_runtime; //remainder of time before my limit
             ag_runtime = ag_runtime + temp; //total time i worked
@@ -152,24 +190,27 @@ int main(int argc, char** argv) {
                 local_ns = worktime - temp;
             }
             *sim_ns = local_ns; //increment shared sim clock
-            //pack info and send message to master that I'm terminating
+            //pack info into struct to send to master
             myinfo.s = local_s;
             myinfo.ns = local_ns;
             myinfo.logicnum = slavenum;
             myinfo.runtime = ag_runtime;
-            printf("Slave %d: ag_runtime=%d, runtime_limit=%d\n", slavenum, ag_runtime, runtime_limit);
+            myinfo.lifespan = getLifespan(starttime_s, starttime_ns, local_s,
+                    local_ns);
+            //send info & message to master that I'm terminating
             if ( msgsnd(commsqid, &myinfo, sizeof(myinfo), 0) == -1 ) {
                 perror("Slave: Error sending termination message");
                 exit(0);
             }
-            //cede the crit section before exiting
+            //cede the critical section before exiting
             if ( msgsnd(mutexq_id, &mutexmsg, sizeof(mutexmsg), 0) == -1 ) {
                 perror("Slave: error exiting crit section");
-            exit(0);
+                exit(0);
             }
             exit(1);
         }
-
+        
+        //I'm not terminating, do the normal stuff
         local_ns = local_ns + worktime; //increment local clock variable
         ag_runtime = ag_runtime + worktime; //increment my aggregate work time
         
@@ -179,7 +220,7 @@ int main(int argc, char** argv) {
             local_ns = worktime - temp;
         }
 
-        //update sim clock in chared memory
+        //update sim clock in shared memory
         *sim_s = local_s;
         *sim_ns = local_ns;
         
@@ -203,3 +244,14 @@ static void siginthandler(int sig_num) {
     exit(0);
 }
 
+//accepts starting time and ending time and returns lifespan in nanoseconds only
+int getLifespan(int start_s, int start_ns, int end_s, int end_ns) {
+    int lifespan; //lifespan in nanoseconds
+    if (start_s == end_s) { //if no second rollover calc is needed
+        lifespan = end_ns - start_ns;
+    }
+    else { //if this process began at sec == x but ended at sec == x+1
+        lifespan = (BILLION - start_ns) + end_ns;
+    }
+    return lifespan;
+}

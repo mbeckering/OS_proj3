@@ -62,6 +62,13 @@ int main(int argc, char** argv) {
     int localns;
     int temp;
     
+    // Set up ctrl^c interrupt handling
+    signal (SIGINT, siginthandler);
+    if (setinterrupt() == -1) {
+        perror("Failed to set up SIGALRM handler");
+        return 1;
+    }
+    
      //struct for mutex enforcement message queue
     struct mutexbuf {
         long mtype;
@@ -75,7 +82,7 @@ int main(int argc, char** argv) {
     struct commsbuf {
         long mtype;
         pid_t childpid;
-        int s, ns, logicnum, lifetime, runtime;
+        int s, ns, logicnum, lifespan, runtime;
     };
     struct commsbuf childinfo;
     
@@ -133,13 +140,7 @@ int main(int argc, char** argv) {
     else
         printf("Master: Using default runtime limit of %2.1f seconds.\n", runtime);
     
-    // Set up interrupt handling
-    signal (SIGINT, siginthandler);
-    if (setinterrupt() == -1) {
-        perror("Failed to set up SIGALRM handler");
-        return 1;
-    }
-    // Set up periodic timer
+    // Set up periodic timer (needs to be done AFTER parsing command line args)
     if (setperiodic(runtime) == -1) {
         perror("Failed to setup periodic interrupt");
         return 1;
@@ -219,21 +220,23 @@ int main(int argc, char** argv) {
         }
         //write child termination to log
         fprintf(mlog,"Master: Child pid %ld is terminating at time %02d:%09d "
-                "because it reached 00:%09d and lived for time xx.xx.\n",
-            childinfo.childpid, childinfo.s, childinfo.ns, childinfo.runtime);
-        //fflush(mlog);
+                "because it worked for 00:%09d and lived for 00:%09d.\n",
+            childinfo.childpid, childinfo.s, childinfo.ns, childinfo.runtime,
+            childinfo.lifespan);
         
-        //critical section 
-        //wait for clock access
+        //wait for clock access: critical section barrier
         if ( msgrcv(mutex_qid, &mutexmsg, sizeof(mutexmsg), 1, 0) == -1 ) {
             perror("Master: error in msgrcv from terminating slave");
             exit(0);
         }
         
-        //check clock. if total+100ns >= 2 seconds, SHUT ER DOWN (break?)
+        //critical section BEGINS
+        //read sim clock
         localsec = *sim_s;
         localns = *sim_ns;
-        localns = localns + 100; //increment 100ns for master operation
+        if (localsec < 2) {
+            localns = localns + 100; //increment 100ns for master operation
+        }
         if (localns >= BILLION) { //roll ns to s if exceeding 1billion
             localsec++;
             temp = BILLION - localns;
@@ -271,10 +274,11 @@ int main(int argc, char** argv) {
             perror("Master: error sending init msg");
             exit(0);
         }
+        //critical section ENDS
         totalforks++;
         //break if fork limit is reached
-        if ( totalforks >= 600) {
-            printf("Master: 600 forks reached, breaking.\n");
+        if ( totalforks >= 100) {
+            printf("Master: 100 forks reached, breaking.\n");
             break;
         }
     }
