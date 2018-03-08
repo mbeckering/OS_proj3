@@ -64,12 +64,13 @@ int main(int argc, char** argv) {
     
     // Set up ctrl^c interrupt handling
     signal (SIGINT, siginthandler);
+    //set up interrupt timer
     if (setinterrupt() == -1) {
         perror("Failed to set up SIGALRM handler");
         return 1;
     }
     
-    printf("Master: mypid=%ld\n", getpid());
+    //printf("Master: mypid=%ld\n", getpid());
     
      //struct for mutex enforcement message queue
     struct mutexbuf {
@@ -254,7 +255,7 @@ int main(int argc, char** argv) {
         }
         //break and terminate if fork limit is reached
         if ( totalforks >= 100) {
-            printf("Master: 100 forks reached, breaking.\n");
+            printf("Master: 100 forks reached.\n");
             fprintf(mlog, "Master: 100 forks reached.\n");
             break;
         }
@@ -276,8 +277,8 @@ int main(int argc, char** argv) {
             perror("execl() failure"); //report & exit if exec fails
             return 0;
         }
-        fprintf(mlog, "Master pid=%ld: Creating new child pid %ld at my time %02d:%09d\n",
-            getpid(), childpid, localsec, localns);
+        fprintf(mlog, "Master: Creating new child pid %ld at my time %02d:%09d\n",
+            childpid, localsec, localns);
         //store child pid to the array position of the last terminated child
         childpids[childinfo.logicnum] = childpid;
         
@@ -293,12 +294,12 @@ int main(int argc, char** argv) {
     //END MEAT OF PROGRAM*******************************************************
     //If this point is reached, total runtime has been met
     //kill children, clear shared memory and message queues, and exit
-    printf("Master pid=%ld broke from main loop\n", getpid());
+    //printf("Master pid=%ld broke from main loop\n", getpid());
     killchildren();
     clearIPC();
-    fprintf(mlog, "Master pid=%ld: Normal exit.\n", getpid());
+    fprintf(mlog, "Master: Normal exit.\n");
     fclose(mlog);
-    printf("Master pid=%ld: Normal exit.\n", getpid());
+    printf("Master: Normal exit.\n");
     return 1;
 }
 
@@ -319,7 +320,7 @@ void killchildren() {
     for (i=0; i < maxSlaves ; i++) {
         result = waitpid(childpids[i], &status, WNOHANG);
         if (result == 0) {//child is still alive
-            printf("Master pid=%ld: killing active child %ld\n", getpid(), childpids[i]);
+            printf("Master: killing active child %ld\n", childpids[i]);
             kill(childpids[i], SIGINT);
         }
         else if (result == -1) {
@@ -330,14 +331,14 @@ void killchildren() {
             printf("Master: Known child %ld has already terminated.\n", childpids[i]);
         }
     }
-    printf("Master pid=%ld: Exited kill loop, i=%d\n", getpid(), i);
+    //printf("Master pid=%ld: Exited kill loop, i=%d\n", getpid(), i);
     //wait for all children to finish
     while ( (sh_wpid = wait(&sh_status)) > 0);
 }
 
 //function to clear shared memory
 void clearIPC() {
-    printf("Master pid=%ld: Clearing IPC resources...\n", getpid());
+    printf("Master: Clearing IPC resources...\n");
     //shared memory
     if ( shmctl(shmid_sim_s, IPC_RMID, NULL) == -1) {
         perror("error removing shared memory");
@@ -402,9 +403,9 @@ static void siginthandler(int sig_num) {
     killchildren();
     clearIPC();
     
-    fprintf(mlog, "Master pid=%ld: Terminated: Interrupted\n", getpid());
+    fprintf(mlog, "Master: Terminated: Interrupted\n");
     fclose(mlog);
     
-    printf("Master pid=%ld: Terminated: Interrupted\n", getpid());
+    printf("Master: Terminated: Interrupted\n");
     exit(0);
 }
