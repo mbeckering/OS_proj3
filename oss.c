@@ -69,6 +69,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     
+    printf("Master: mypid=%ld\n", getpid());
+    
      //struct for mutex enforcement message queue
     struct mutexbuf {
         long mtype;
@@ -183,7 +185,7 @@ int main(int argc, char** argv) {
         return -1;
     }
     
-    fprintf(mlog, "Master: Launched.\n");
+    fprintf(mlog, "Master: Launched, my pid=%ld.\n", getpid());
     
     //BEGIN MEAT OF PROGRAM*****************************************************
     
@@ -201,8 +203,8 @@ int main(int argc, char** argv) {
                 return 1;
             }
         if (childpid == 0) { //child code
-            sprintf(str_slavenum, "%d", i); //build arg2 string
-            sprintf(str_proclimit, "%d", maxSlaves); //build arg1 string
+            sprintf(str_slavenum, "%d", i); //build arg1 string
+            sprintf(str_proclimit, "%d", maxSlaves); //build arg2 string
             execlp("./user", "./user", str_slavenum, str_proclimit, (char *)NULL);
             perror("execl() failure"); //report & exit if exec fails
             return 0;
@@ -223,6 +225,7 @@ int main(int argc, char** argv) {
                 "because it worked for 00:%09d and lived for 00:%09d.\n",
             childinfo.childpid, childinfo.s, childinfo.ns, childinfo.runtime,
             childinfo.lifespan);
+        fflush(mlog);
         
         //wait for clock access: critical section barrier
         if ( msgrcv(mutex_qid, &mutexmsg, sizeof(mutexmsg), 1, 0) == -1 ) {
@@ -237,7 +240,7 @@ int main(int argc, char** argv) {
         if (localsec < 2) {
             localns = localns + 100; //increment 100ns for master operation
         }
-        if (localns >= BILLION) { //roll ns to s if exceeding 1billion
+        if ( (localns >= BILLION) && (localsec < 2) ) { //roll ns to s if exceeding 1billion
             localsec++;
             temp = BILLION - localns;
             localns = 100 - temp;
@@ -249,26 +252,35 @@ int main(int argc, char** argv) {
                     localsec, localns, totalforks);
             break;
         }
+        //break and terminate if fork limit is reached
+        if ( totalforks >= 100) {
+            printf("Master: 100 forks reached, breaking.\n");
+            fprintf(mlog, "Master: 100 forks reached.\n");
+            break;
+        }
         
         //update sim clock in shared memory
         *sim_s = localsec;
         *sim_ns = localns;
         
-        //fork new child and STORE CHILDPID in logical slave# array position
+        //fork new child and assign same logical number as last slave
+        //that reported termination
         if ( (childpid = fork()) < 0 ){ //terminate code
-                perror("Error forking consumer");
+                perror("Error forking Slave");
                 return 1;
             }
         if (childpid == 0) { //child code
-            sprintf(str_slavenum, "%d", childinfo.logicnum); //build arg2 string
-            sprintf(str_proclimit, "%d", maxSlaves); //build arg1 string
+            sprintf(str_slavenum, "%d", childinfo.logicnum); //build arg1 string
+            sprintf(str_proclimit, "%d", maxSlaves); //build arg2 string
             execlp("./user", "./user", str_slavenum, str_proclimit, (char *)NULL);
             perror("execl() failure"); //report & exit if exec fails
             return 0;
         }
-        fprintf(mlog, "Master: Creating new child pid %ld at my time %02d:%09d\n",
-            childpid, localsec, localns);
-        childpids[childinfo.logicnum] = childpid; //store child pid to array
+        fprintf(mlog, "Master pid=%ld: Creating new child pid %ld at my time %02d:%09d\n",
+            getpid(), childpid, localsec, localns);
+        //store child pid to the array position of the last terminated child
+        childpids[childinfo.logicnum] = childpid;
+        
         //cede clock access
         if ( msgsnd(mutex_qid, &mutexmsg, sizeof(mutexmsg), 0) == -1 ) {
             perror("Master: error sending init msg");
@@ -276,21 +288,17 @@ int main(int argc, char** argv) {
         }
         //critical section ENDS
         totalforks++;
-        //break if fork limit is reached
-        if ( totalforks >= 100) {
-            printf("Master: 100 forks reached, breaking.\n");
-            break;
-        }
     }
     
     //END MEAT OF PROGRAM*******************************************************
     //If this point is reached, total runtime has been met
     //kill children, clear shared memory and message queues, and exit
+    printf("Master pid=%ld broke from main loop\n", getpid());
     killchildren();
     clearIPC();
-    fprintf(mlog, "Master: Normal exit.\n");
+    fprintf(mlog, "Master pid=%ld: Normal exit.\n", getpid());
     fclose(mlog);
-    printf("Master: Normal exit.\n");
+    printf("Master pid=%ld: Normal exit.\n", getpid());
     return 1;
 }
 
@@ -306,19 +314,30 @@ static void helpmessage() {
 
 //kill the children
 void killchildren() {
-    int sh_status, i;
-    pid_t sh_wpid;
-    printf("Master: Killing children...\n");
+    int sh_status, status, i;
+    pid_t sh_wpid, result;
     for (i=0; i < maxSlaves ; i++) {
-        kill(childpids[i], SIGINT);
+        result = waitpid(childpids[i], &status, WNOHANG);
+        if (result == 0) {//child is still alive
+            printf("Master pid=%ld: killing active child %ld\n", getpid(), childpids[i]);
+            kill(childpids[i], SIGINT);
+        }
+        else if (result == -1) {
+            //perror("Master: error getting child status before termination");
+            exit(0);
+        }
+        else {
+            printf("Master: Known child %ld has already terminated.\n", childpids[i]);
+        }
     }
+    printf("Master pid=%ld: Exited kill loop, i=%d\n", getpid(), i);
     //wait for all children to finish
     while ( (sh_wpid = wait(&sh_status)) > 0);
 }
 
 //function to clear shared memory
 void clearIPC() {
-    printf("Master: Clearing IPC resources...\n");
+    printf("Master pid=%ld: Clearing IPC resources...\n", getpid());
     //shared memory
     if ( shmctl(shmid_sim_s, IPC_RMID, NULL) == -1) {
         perror("error removing shared memory");
@@ -378,16 +397,14 @@ static void interrupt(int signo, siginfo_t *info, void *context) {
 }
 
 static void siginthandler(int sig_num) {
-    int sh_status, i;
-    pid_t sh_wpid;
-    printf("Master: Ctrl+C interrupt detected! signo = %d\n", sig_num);
+    //printf("Master pid=%ld: Ctrl+C interrupt detected! signo = %d\n", getpid(), sig_num);
     
     killchildren();
     clearIPC();
     
-    fprintf(mlog, "Master: Terminated: Interrupted\n");
+    fprintf(mlog, "Master pid=%ld: Terminated: Interrupted\n", getpid());
     fclose(mlog);
     
-    printf("Master: Terminated: Interrupted\n");
+    printf("Master pid=%ld: Terminated: Interrupted\n", getpid());
     exit(0);
 }

@@ -5,6 +5,18 @@ master.log is default logfile name
 
 For usage: ./oss -h
 
+Interrupt Handling
+------------------
+Made a temporary fix to a strange problem I asked about, but couldn't squash:
+When master reaches the point of killing active children, sometimes the 
+master SIGINT handler somehow catches the SIGINT instead of the child aka 
+user.c SIGINT handler. To avoid problems with output, logging, and attempts 
+to close IPC resources that had already been closed, I had the sigint handler 
+exit if waitpid returned an error in the kill loop. The slaves should report 
+to output if they caught a SIGINT. Someones they catch it, sometimes they
+don't. Either way, I'm never left with any processes running so I have no 
+idea how or why it's happening.
+
 Log Output
 ----------
 Log output: Had a couple unanswered questions, so I did my best and interpreted 
@@ -37,6 +49,13 @@ Critical Section Enforcement
 ----------------------------
 I use two message queues: One for mutex protection of the sim clock for both 
 master and children, and one for the slaves to notify the parent when they 
-terminate and send the necessary information.
+terminate and send the necessary information. It's very rare that the master 
+enters the crit section, sees that the sim clock is at 2 seconds, and 
+terminates the children. Almost every run, all the children seems to get in 
+to the crit section, cede and terminate before the master has a chance. Not 
+sure why but it feels inefficient. I considered having the first child that 
+sees that the clock is at 2 seconds send an extra flag for the master to kill 
+the rest. But then we would miss those remaining log entries from the 
+children before they terminate themselves. I decided to leave it this way.
 
 End readme 

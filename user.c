@@ -34,6 +34,10 @@ int shmid_sim_s, shmid_sim_ns; //shared memory ID holders for sim clock
  * 
  */
 int main(int argc, char** argv) {
+    
+    // Set up interrupt handler
+    signal (SIGINT, siginthandler);
+    
     int slavenum, slavelimit;
     slavenum = atoi(argv[1]); //logical number of this process
     slavelimit = atoi(argv[2]); //max number of concurrent slaves
@@ -51,7 +55,7 @@ int main(int argc, char** argv) {
     unsigned long runtime_limit = rand();
     runtime_limit <<= 15; //next 4 lines taken from stackoverflow for big rands
     runtime_limit ^= rand();
-    runtime_limit %= 100000000;
+    runtime_limit %= 1000000;
     runtime_limit++;
     
     //struct for mutex enforcement message queue
@@ -72,9 +76,6 @@ int main(int argc, char** argv) {
     struct commsbuf myinfo;
     myinfo.mtype = 1;
     myinfo.pid = getpid();
-    
-    // Set up interrupt handler
-    signal (SIGINT, siginthandler);
     
     // Set up shared memory
     shmid_sim_s = shmget(SHMKEY_sim_s, BUFF_SZ, 0777);
@@ -111,7 +112,7 @@ int main(int argc, char** argv) {
             perror("Slave: error in msgrcv");
             exit(0);
         }
-        //critical section: pull clock values first
+        //critical section BEGIN: pull clock values first
         local_s = *sim_s;
         local_ns = *sim_ns;
         //on first iteration, store this slave's start time from the sim clock
@@ -119,9 +120,9 @@ int main(int argc, char** argv) {
             starttime_s = local_s;
             starttime_ns = local_ns;
         }
-        //cede and break if total master runtime_limit has been reached
+        //cede and break if total master runtime_limit has already been reached
         if (local_s >= 2) {
-            printf("Slave %02d: Total master runtime limit reached. "
+            printf("Slave %02d: Sim clock limit reached. "
                     "Ceding and terminating.\n", slavenum);
             if ( msgsnd(mutexq_id, &mutexmsg, sizeof(mutexmsg), 0) == -1 ) {
                 perror("Slave: error exiting crit section");
@@ -143,14 +144,14 @@ int main(int argc, char** argv) {
         }
         
         //generate random work time
-        seed = seed*( (slavenum + 1) *3);
+        seed = seed*( (slavenum + 1) /3);
         srand(seed);
         worktime = rand() %200000 + 1;
         
         //if this worktime will exceed the maximum MASTER runtime of 2 seconds
         //then only increment enough to reach 2 seconds, then report and quit
         if ((local_s == 1) && ( (worktime + local_ns) >= BILLION) ) {
-            printf("Slave %d bout to work over 2 sec\n", slavenum);
+            printf("Slave %d: Reaching limit of sim clock on this work cycle.\n", slavenum);
             worktime = (BILLION - local_ns);
             ag_runtime = ag_runtime + worktime;
             local_s++;
@@ -224,7 +225,7 @@ int main(int argc, char** argv) {
         *sim_s = local_s;
         *sim_ns = local_ns;
         
-        //end critical section and cede clock access
+        //END critical section and cede clock access
         if ( msgsnd(mutexq_id, &mutexmsg, sizeof(mutexmsg), 0) == -1 ) {
             perror("error exiting crit section");
             exit(0);
@@ -238,8 +239,6 @@ int main(int argc, char** argv) {
 
 //signal handler
 static void siginthandler(int sig_num) {
-    int sh_status, i;
-    pid_t sh_wpid;
     printf("Slave(pid %ld) Terminating: Interrupted.\n", getpid());
     exit(0);
 }
